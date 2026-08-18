@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the v prefix (for example, 0.1.0)
+        required: true
+        type: string
+      prerelease:
+        description: Mark this as a prerelease
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: macos-15
+    env:
+      VERSION: ${{ inputs.version }}
+      PRERELEASE: ${{ inputs.prerelease }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the selected commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate release request
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo "Run releases from the default branch ($DEFAULT_BRANCH), not $GITHUB_REF" >&2
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Version must look like 0.1.0 or 0.1.0-beta.1" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists; release versions are immutable" >&2
+            exit 1
+          fi
+
+      - name: Select pinned Xcode
+        run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
+
+      - name: Record toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          uname -a
+
+      - name: Test
+        run: swift test --configuration release
+
+      - name: Build Universal release archives
+        env:
+          KIYO_BUILD_NUMBER: ${{ github.run_number }}
+        run: Scripts/build-release.sh "$VERSION" dist/release
+
+      - name: Verify release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist/release
+          shasum -a 256 -c SHA256SUMS.txt
+          ditto -x -k "kiyoctl-v$VERSION-macos-universal.zip" "$RUNNER_TEMP/cli-check"
+          ditto -x -k "KiyoMenu-v$VERSION-macos-universal.zip" "$RUNNER_TEMP/app-check"
+          lipo "$RUNNER_TEMP/cli-check/kiyoctl-v$VERSION-macos-universal/kiyoctl" \
+            -verify_arch arm64 x86_64
+          lipo "$RUNNER_TEMP/app-check/KiyoMenu.app/Contents/MacOS/KiyoMenu" \
+            -verify_arch arm64 x86_64
+          codesign --verify --strict --verbose=2 \
+            "$RUNNER_TEMP/cli-check/kiyoctl-v$VERSION-macos-universal/kiyoctl"
+          codesign --verify --deep --strict --verbose=2 \
+            "$RUNNER_TEMP/app-check/KiyoMenu.app"
+
+      - name: Preserve workflow artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kiyoctl-v${{ inputs.version }}-release
+          if-no-files-found: error
+          path: |
+            dist/release/KiyoMenu-v${{ inputs.version }}-macos-universal.zip
+            dist/release/kiyoctl-v${{ inputs.version }}-macos-universal.zip
+            dist/release/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(
+            "v$VERSION"
+            --target "$GITHUB_SHA"
+            --title "kiyoctl v$VERSION"
+            --generate-notes
+            --notes "These macOS Universal downloads support Apple Silicon and Intel. The app and CLI are ad-hoc signed, not Apple-notarized; macOS may require explicit approval on first launch. Review the project warning before use."
+            "dist/release/KiyoMenu-v$VERSION-macos-universal.zip#Menu bar app (macOS Universal)"
+            "dist/release/kiyoctl-v$VERSION-macos-universal.zip#CLI (macOS Universal)"
+            "dist/release/SHA256SUMS.txt#SHA-256 checksums"
+          )
+          if [[ "$PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"

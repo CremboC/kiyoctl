@@ -94,6 +94,22 @@ The Razer persist command is proven for its vendor FOV/HDR/AF settings. Whether 
 commits the standard UVC zoom value is not yet verified, so a digital FOV reports
 **save requested**, not **saved**, until an unplug/replug test confirms it.
 
+### Release downloads
+
+Maintainers can create a repeatable release from GitHub's **Actions → Release → Run
+workflow** screen. Enter a new version such as `0.1.0` and run it from the default branch.
+The workflow tests the package, builds Universal macOS binaries for Apple Silicon and
+Intel, verifies both architectures and signatures, creates SHA-256 checksums, tags the
+exact commit, and publishes these assets:
+
+- `KiyoMenu-vX.Y.Z-macos-universal.zip` — native menu-bar application.
+- `kiyoctl-vX.Y.Z-macos-universal.zip` — CLI with the README and licence.
+- `SHA256SUMS.txt` — checksums for both archives.
+
+The same archives can be reproduced locally with `Scripts/build-release.sh X.Y.Z`.
+Current releases are ad-hoc signed rather than Apple-notarized, so macOS may require the
+user to explicitly approve the first launch in **System Settings → Privacy & Security**.
+
 ## Usage
 
 ```
