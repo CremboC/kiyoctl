@@ -48,6 +48,28 @@ install -m 755 .build/release/kiyoctl /usr/local/bin/kiyoctl
 A plain non-sandboxed CLI needs no entitlement. A sandboxed GUI app built on `KiyoKit`
 would need `com.apple.security.device.usb`; notarisation is otherwise unremarkable.
 
+### Menu bar app
+
+Build the native AppKit menu-bar app as a local, non-sandboxed application bundle:
+
+```bash
+Scripts/build-menu-app.sh
+open dist/KiyoMenu.app
+```
+
+The camera icon appears in the macOS menu bar; the app has no Dock icon. Changes are
+**session-only by default**. Check **Save changes to camera** to persist every subsequent
+change. You can also make several session-only changes and then check it: the app sends
+one persistence command to save the accumulated camera state. Uncheck it to return to
+session-only changes.
+
+The menu app sends no control transfers merely by launching or opening its menu. It
+enumerates the camera once at launch, disables controls while a command is running, and
+uses the same pacing, transfer ceiling, exact payload validation and no-retry behavior as
+the CLI. Checkmarks mean only "successfully written by this app during this session" —
+the firmware does not provide reliable read-back. The locally built bundle is ad-hoc
+signed without App Sandbox or USB entitlements.
+
 ## Usage
 
 ```
@@ -143,6 +165,7 @@ transfers. There is deliberately no arbitrary-payload or stress command.
 Sources/CKiyoUSB/     IOKit transport. The whole platform-specific surface.
 Sources/KiyoKit/      Protocol constants, sequencing, throttling, state cache.
 Sources/kiyoctl/      CLI.
+Sources/KiyoMenu/     Native AppKit menu-bar app.
 ```
 
 The transport opens the **device**, not the VideoControl interface: the system UVC driver

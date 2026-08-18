@@ -21,6 +21,14 @@ import Testing
     try KiyoDevice.validate(plan)
 }
 
+@Test func accumulatedSettingsCanBePersistedOnce() throws {
+    let plan = KiyoProtocol.persistPlan
+
+    #expect(plan.count == 1)
+    #expect(plan.first?.payload == KiyoProtocol.persist)
+    try KiyoDevice.validate(plan)
+}
+
 @Test func unsafeOptionsAreRejectedBeforeOpeningUSBDevice() {
     var options = KiyoDevice.Options()
     options.delayMilliseconds = KiyoDevice.minimumDelayMilliseconds - 1

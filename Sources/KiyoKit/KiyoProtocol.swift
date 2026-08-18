@@ -39,6 +39,13 @@ public enum KiyoProtocol {
     /// current session and is lost on replug.
     public static let persist: [UInt8] = [0xc0, 0x03, 0xa8, 0x00, 0x00, 0x00, 0x00, 0x00]
 
+    /// A constrained, persist-only plan for committing settings that were
+    /// already applied to the live camera session. This intentionally exposes
+    /// only the known persistence command, never arbitrary payloads.
+    public static var persistPlan: [KiyoTransfer] {
+        [KiyoTransfer(label: "persist to camera", payload: persist)]
+    }
+
     /// Synapse sends this at startup. Its purpose is unknown and omitting it
     /// appears to be harmless. The CLI intentionally does not expose it.
     public static let unidentifiedInit: [UInt8] = [0xff, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
@@ -168,8 +175,7 @@ public struct KiyoSettings: Sendable {
         transfers += autofocus?.transfers ?? []
 
         if save, !transfers.isEmpty {
-            transfers.append(KiyoTransfer(label: "persist to camera",
-                                          payload: KiyoProtocol.persist))
+            transfers += KiyoProtocol.persistPlan
         }
 
         return transfers

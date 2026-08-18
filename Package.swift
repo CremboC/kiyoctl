@@ -7,6 +7,7 @@ let package = Package(
     platforms: [.macOS(.v12)],
     products: [
         .executable(name: "kiyoctl", targets: ["kiyoctl"]),
+        .executable(name: "KiyoMenu", targets: ["KiyoMenu"]),
         // Exposed so a menu-bar app can link the same protocol and transport
         // layer without going through the CLI.
         .library(name: "KiyoKit", targets: ["KiyoKit"]),
@@ -22,6 +23,10 @@ let package = Package(
             ]),
         .target(name: "KiyoKit", dependencies: ["CKiyoUSB"]),
         .executableTarget(name: "kiyoctl", dependencies: ["KiyoKit"]),
+        .executableTarget(
+            name: "KiyoMenu",
+            dependencies: ["KiyoKit"],
+            linkerSettings: [.linkedFramework("AppKit")]),
         .testTarget(name: "KiyoKitTests", dependencies: ["KiyoKit"]),
     ],
     swiftLanguageModes: [.v5])
