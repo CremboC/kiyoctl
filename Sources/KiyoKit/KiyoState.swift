@@ -8,7 +8,7 @@ import Foundation
 /// since, from Synapse on another machine or another copy of this tool. Never
 /// present it as the device's state.
 public struct KiyoState: Codable, Sendable {
-    public static let currentSchema = 1
+    public static let currentSchema = 2
 
     public var schema: Int
     public var updatedAt: String?
@@ -19,6 +19,8 @@ public struct KiyoState: Codable, Sendable {
     public var hdr: String?
     public var hdrMode: String?
     public var autofocus: String?
+    public var zoomAbsolute: UInt16?
+    public var approximateFieldOfView: Double?
     /// Whether the last write included the persist command.
     public var persisted: Bool?
 
@@ -34,6 +36,15 @@ public struct KiyoState: Codable, Sendable {
         return serial == device.serial
     }
 
+    /// A weaker match used only to restore non-authoritative menu checkmarks.
+    /// When the camera has no serial, location and firmware are the best
+    /// available fingerprint. Never use this to merge state for a camera write.
+    public func canRestoreDisplay(for device: KiyoDeviceInfo) -> Bool {
+        if !device.serial.isEmpty, let serial { return serial == device.serial }
+        guard device.serial.isEmpty, serial == nil else { return false }
+        return locationID == device.locationHex && firmware == device.firmwareVersion
+    }
+
     /// Folds a just-applied batch in, leaving untouched settings alone.
     public mutating func record(_ settings: KiyoSettings, on device: KiyoDeviceInfo, saved: Bool) {
         schema = Self.currentSchema
@@ -47,6 +58,14 @@ public struct KiyoState: Codable, Sendable {
         if let value = settings.hdrMode { hdrMode = value.rawValue }
         if let value = settings.autofocus { autofocus = value.rawValue }
         persisted = saved
+    }
+
+    public mutating func recordDigitalFOV(base: FieldOfView, zoomValue: UInt16,
+                                          approximateDegrees: Double,
+                                          on device: KiyoDeviceInfo, saved: Bool) {
+        record(KiyoSettings(fieldOfView: base), on: device, saved: saved)
+        zoomAbsolute = zoomValue
+        approximateFieldOfView = approximateDegrees
     }
 }
 

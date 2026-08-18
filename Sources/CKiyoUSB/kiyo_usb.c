@@ -27,13 +27,21 @@ static const uint8_t kKiyoXUGuid[16] = {
 /* USB / UVC descriptor and request constants. */
 #define USB_DT_INTERFACE       0x04
 #define UVC_DT_CS_INTERFACE    0x24
+#define UVC_VC_INPUT_TERMINAL  0x02
 #define UVC_VC_EXTENSION_UNIT  0x06
 #define USB_CLASS_VIDEO        0x0E
 #define USB_SUBCLASS_VIDEOCTL  0x01
+#define UVC_ITT_CAMERA          0x0201
 
 #define UVC_SET_CUR            0x01
 #define UVC_GET_CUR            0x81
+#define UVC_GET_MIN            0x82
+#define UVC_GET_MAX            0x83
+#define UVC_GET_RES            0x84
 #define UVC_GET_LEN            0x85
+#define UVC_GET_INFO           0x86
+#define UVC_GET_DEF            0x87
+#define UVC_CT_ZOOM_ABSOLUTE   0x0B
 
 /* Extension-unit descriptor layout:
  *   0 bLength | 1 bDescriptorType | 2 bDescriptorSubType | 3 bUnitID
@@ -41,6 +49,8 @@ static const uint8_t kKiyoXUGuid[16] = {
  * so the GUID sits at +4 and bUnitID is the byte immediately before it. */
 #define XU_GUID_OFFSET         4
 #define XU_MIN_LENGTH          (XU_GUID_OFFSET + 16)
+#define CAMERA_TERMINAL_BASE_LENGTH 15
+#define CAMERA_ZOOM_ABSOLUTE_BIT 9
 
 #define KIYO_XFER_TIMEOUT_MS   1000
 
@@ -54,6 +64,8 @@ struct kiyo_handle {
     uint16_t bcd_device;
     uint8_t  unit_id;
     uint8_t  vc_interface;
+    uint8_t  camera_terminal_id;
+    bool     zoom_absolute_supported;
     bool     opened;
 };
 
@@ -145,6 +157,50 @@ static bool walk_for_xu(const uint8_t *desc, uint16_t total,
     }
 
     return false;
+}
+
+static uint16_t read_le16(const uint8_t *bytes)
+{
+    return (uint16_t)(bytes[0] | ((uint16_t)bytes[1] << 8));
+}
+
+/* Camera Terminal metadata is standard UVC and lives in the cached
+ * configuration descriptor, so discovering it does not open the device or
+ * issue any control transfer. Zoom (Absolute) is bit D9 of bmControls. */
+static void describe_camera_terminal(const uint8_t *desc, uint16_t total,
+                                     kiyo_device_info *info)
+{
+    uint16_t offset = 0;
+
+    while (offset + 2 <= total) {
+        uint8_t length = desc[offset];
+        uint8_t type = desc[offset + 1];
+        if (length < 2 || (uint32_t)offset + length > total) { return; }
+
+        if (type == UVC_DT_CS_INTERFACE &&
+            length >= CAMERA_TERMINAL_BASE_LENGTH &&
+            desc[offset + 2] == UVC_VC_INPUT_TERMINAL &&
+            read_le16(desc + offset + 4) == UVC_ITT_CAMERA) {
+            uint8_t control_size = desc[offset + 14];
+            if ((uint16_t)CAMERA_TERMINAL_BASE_LENGTH + control_size > length) { return; }
+
+            info->camera_terminal_found = true;
+            info->camera_terminal_id = desc[offset + 3];
+            info->objective_focal_length_min = read_le16(desc + offset + 8);
+            info->objective_focal_length_max = read_le16(desc + offset + 10);
+            info->ocular_focal_length = read_le16(desc + offset + 12);
+
+            uint8_t byte_index = CAMERA_ZOOM_ABSOLUTE_BIT / 8;
+            uint8_t bit_index = CAMERA_ZOOM_ABSOLUTE_BIT % 8;
+            info->zoom_absolute_supported =
+                control_size > byte_index &&
+                (desc[offset + CAMERA_TERMINAL_BASE_LENGTH + byte_index] &
+                 (uint8_t)(1u << bit_index)) != 0;
+            return;
+        }
+
+        offset = (uint16_t)(offset + length);
+    }
 }
 
 /*
@@ -247,6 +303,8 @@ static int32_t describe_device(IOUSBDeviceInterface182 **dev, kiyo_device_info *
     const uint8_t *bytes = (const uint8_t *)config;
     uint8_t unit_id = 0;
     uint8_t vc_iface = 0;
+
+    describe_camera_terminal(bytes, total, info);
 
     if (walk_for_xu(bytes, total, &unit_id, &vc_iface)) {
         info->unit_id = unit_id;
@@ -437,6 +495,8 @@ int32_t kiyo_open(uint32_t location_id, kiyo_handle **out_handle)
     h->bcd_device = info.bcd_device;
     h->unit_id = info.unit_id;
     h->vc_interface = info.vc_interface;
+    h->camera_terminal_id = info.camera_terminal_id;
+    h->zoom_absolute_supported = info.zoom_absolute_supported;
     h->opened = true;
 
     *out_handle = h;
@@ -466,6 +526,11 @@ static uint16_t kiyo_windex(const kiyo_handle *h)
     return (uint16_t)(((uint16_t)h->unit_id << 8) | h->vc_interface);
 }
 
+static uint16_t kiyo_entity_windex(const kiyo_handle *h, uint8_t entity_id)
+{
+    return (uint16_t)(((uint16_t)entity_id << 8) | h->vc_interface);
+}
+
 static void kiyo_prepare_request(IOUSBDevRequestTO *req, const kiyo_handle *h,
                                  uint8_t direction, uint8_t request,
                                  uint8_t selector, void *data, uint16_t len)
@@ -479,6 +544,15 @@ static void kiyo_prepare_request(IOUSBDevRequestTO *req, const kiyo_handle *h,
     req->pData = data;
     req->noDataTimeout = KIYO_XFER_TIMEOUT_MS;
     req->completionTimeout = KIYO_XFER_TIMEOUT_MS;
+}
+
+static void kiyo_prepare_entity_request(IOUSBDevRequestTO *req, const kiyo_handle *h,
+                                        uint8_t entity_id, uint8_t direction,
+                                        uint8_t request, uint8_t selector,
+                                        void *data, uint16_t len)
+{
+    kiyo_prepare_request(req, h, direction, request, selector, data, len);
+    req->wIndex = kiyo_entity_windex(h, entity_id);
 }
 
 int32_t kiyo_get_len(kiyo_handle *h, uint8_t selector, uint16_t *out_len)
@@ -533,6 +607,63 @@ int32_t kiyo_get_cur(kiyo_handle *h, uint8_t selector, uint8_t *data, uint16_t l
     return KIYO_OK;
 }
 
+int32_t kiyo_zoom_get(kiyo_handle *h, uint8_t request, uint16_t *out_value)
+{
+    if (h == NULL || h->dev == NULL || out_value == NULL) { return KIYO_ERR_BAD_ARG; }
+    if (!h->zoom_absolute_supported || h->camera_terminal_id == 0) {
+        return KIYO_ERR_NO_ZOOM;
+    }
+
+    switch (request) {
+    case UVC_GET_CUR:
+    case UVC_GET_MIN:
+    case UVC_GET_MAX:
+    case UVC_GET_RES:
+    case UVC_GET_INFO:
+    case UVC_GET_DEF:
+        break;
+    default:
+        return KIYO_ERR_BAD_ARG;
+    }
+
+    uint8_t buffer[2] = { 0, 0 };
+    uint16_t length = request == UVC_GET_INFO ? 1 : 2;
+    IOUSBDevRequestTO req;
+    kiyo_prepare_entity_request(&req, h, h->camera_terminal_id, kUSBIn,
+                                request, UVC_CT_ZOOM_ABSOLUTE, buffer, length);
+
+    IOReturn r = (*h->dev)->DeviceRequestTO(h->dev, &req);
+    if (r != kIOReturnSuccess) { return (int32_t)r; }
+    if (req.wLenDone < length) { return KIYO_ERR_SHORT_XFER; }
+
+    *out_value = request == UVC_GET_INFO
+        ? buffer[0]
+        : read_le16(buffer);
+    return KIYO_OK;
+}
+
+int32_t kiyo_zoom_set(kiyo_handle *h, uint16_t value)
+{
+    if (h == NULL || h->dev == NULL) { return KIYO_ERR_BAD_ARG; }
+    if (!h->zoom_absolute_supported || h->camera_terminal_id == 0) {
+        return KIYO_ERR_NO_ZOOM;
+    }
+
+    uint8_t buffer[2] = {
+        (uint8_t)(value & 0xff),
+        (uint8_t)((value >> 8) & 0xff),
+    };
+    IOUSBDevRequestTO req;
+    kiyo_prepare_entity_request(&req, h, h->camera_terminal_id, kUSBOut,
+                                UVC_SET_CUR, UVC_CT_ZOOM_ABSOLUTE,
+                                buffer, sizeof(buffer));
+
+    IOReturn r = (*h->dev)->DeviceRequestTO(h->dev, &req);
+    if (r != kIOReturnSuccess) { return (int32_t)r; }
+    if (req.wLenDone < sizeof(buffer)) { return KIYO_ERR_SHORT_XFER; }
+    return KIYO_OK;
+}
+
 const char *kiyo_status_string(int32_t code)
 {
     switch (code) {
@@ -545,6 +676,7 @@ const char *kiyo_status_string(int32_t code)
     case KIYO_ERR_NO_MEM:     return "out of memory";
     case KIYO_ERR_SHORT_XFER: return "device accepted the request but transferred too few bytes";
     case KIYO_ERR_TOO_LONG:   return "payload longer than the transport allows";
+    case KIYO_ERR_NO_ZOOM:    return "Camera Terminal does not advertise Zoom Absolute";
     default: break;
     }
 

@@ -12,6 +12,12 @@ public struct KiyoDeviceInfo: Sendable {
     public let vcInterface: UInt8
     public let extensionUnitFound: Bool
     public let foundViaFallbackScan: Bool
+    public let cameraTerminalFound: Bool
+    public let cameraTerminalID: UInt8
+    public let zoomAbsoluteSupported: Bool
+    public let objectiveFocalLengthMin: UInt16
+    public let objectiveFocalLengthMax: UInt16
+    public let ocularFocalLength: UInt16
 
     /// `bcdDevice` rendered the way Razer's firmware notes write it.
     public var firmwareVersion: String {
@@ -22,6 +28,11 @@ public struct KiyoDeviceInfo: Sendable {
 
     /// The `wIndex` every request to this unit carries.
     public var wIndex: UInt16 { UInt16(unitID) << 8 | UInt16(vcInterface) }
+
+    /// Address used by standard UVC Camera Terminal controls such as Zoom Absolute.
+    public var cameraTerminalWIndex: UInt16 {
+        UInt16(cameraTerminalID) << 8 | UInt16(vcInterface)
+    }
 }
 
 /// An open handle on the camera's default control pipe.
@@ -31,6 +42,16 @@ public struct KiyoDeviceInfo: Sendable {
 /// and no way to hold this open across a UI interaction — the firmware does not
 /// tolerate sustained control traffic.
 public final class KiyoDevice {
+    public struct ZoomCapabilities: Sendable {
+        public let minimum: UInt16
+        public let maximum: UInt16
+        public let step: UInt16
+        public let defaultValue: UInt16
+        public let current: UInt16
+        public let supportsGet: Bool
+        public let supportsSet: Bool
+    }
+
     public struct Options: Sendable {
         /// Delay between consecutive control transfers, in milliseconds.
         ///
@@ -64,6 +85,7 @@ public final class KiyoDevice {
 
     private let handle: OpaquePointer
     private let options: Options
+    private var lastTransferNanoseconds: UInt64?
     public let info: KiyoDeviceInfo
     // MARK: - Discovery
 
@@ -90,7 +112,13 @@ public final class KiyoDevice {
                 unitID: entry.unit_id,
                 vcInterface: entry.vc_interface,
                 extensionUnitFound: entry.xu_found,
-                foundViaFallbackScan: entry.xu_via_fallback)
+                foundViaFallbackScan: entry.xu_via_fallback,
+                cameraTerminalFound: entry.camera_terminal_found,
+                cameraTerminalID: entry.camera_terminal_id,
+                zoomAbsoluteSupported: entry.zoom_absolute_supported,
+                objectiveFocalLengthMin: entry.objective_focal_length_min,
+                objectiveFocalLengthMax: entry.objective_focal_length_max,
+                ocularFocalLength: entry.ocular_focal_length)
         }
     }
 
@@ -121,7 +149,13 @@ public final class KiyoDevice {
             unitID: kiyo_unit_id(opened),
             vcInterface: kiyo_vc_interface(opened),
             extensionUnitFound: true,
-            foundViaFallbackScan: discovered?.foundViaFallbackScan ?? false)
+            foundViaFallbackScan: discovered?.foundViaFallbackScan ?? false,
+            cameraTerminalFound: discovered?.cameraTerminalFound ?? false,
+            cameraTerminalID: discovered?.cameraTerminalID ?? 0,
+            zoomAbsoluteSupported: discovered?.zoomAbsoluteSupported ?? false,
+            objectiveFocalLengthMin: discovered?.objectiveFocalLengthMin ?? 0,
+            objectiveFocalLengthMax: discovered?.objectiveFocalLengthMax ?? 0,
+            ocularFocalLength: discovered?.ocularFocalLength ?? 0)
     }
 
     deinit { kiyo_close(handle) }
@@ -148,7 +182,6 @@ public final class KiyoDevice {
         }
 
         for transfer in transfers {
-            if sent > 0 { pause(milliseconds: options.delayMilliseconds) }
             try send(transfer)
             sent += 1
         }
@@ -158,6 +191,8 @@ public final class KiyoDevice {
 
     /// UVC GET_LEN. Cheap insurance against firmware drift.
     public func controlLength(for selector: KiyoProtocol.Selector) throws -> UInt16 {
+        paceBeforeTransfer()
+        defer { recordTransfer() }
         var length: UInt16 = 0
         let status = kiyo_get_len(handle, selector.rawValue, &length)
 
@@ -171,6 +206,85 @@ public final class KiyoDevice {
         return length
     }
 
+    /// Reads the standard UVC Zoom Absolute capability and range. This sends
+    /// only GET requests, paced exactly like writes; it never changes camera state.
+    public func zoomCapabilities() throws -> ZoomCapabilities {
+        guard info.cameraTerminalFound, info.zoomAbsoluteSupported else {
+            throw KiyoError.invalidArgument("this camera does not advertise UVC Zoom Absolute")
+        }
+
+        let requests: [(name: String, code: UInt8)] = [
+            ("GET_INFO", 0x86),
+            ("GET_MIN", 0x82),
+            ("GET_MAX", 0x83),
+            ("GET_RES", 0x84),
+            ("GET_DEF", 0x87),
+            ("GET_CUR", 0x81),
+        ]
+        guard requests.count <= options.transferLimit else {
+            throw KiyoError.transferLimitExceeded(planned: requests.count,
+                                                  limit: options.transferLimit)
+        }
+
+        var values: [UInt16] = []
+        for request in requests {
+            paceBeforeTransfer()
+            var value: UInt16 = 0
+            let status = kiyo_zoom_get(handle, request.code, &value)
+            recordTransfer()
+            let addressing = String(format: "sel=0x0b wIndex=0x%04x",
+                                    info.cameraTerminalWIndex)
+            options.log?("  → \(request.name)  \(addressing) → "
+                         + (status == 0 ? "\(value)" : "failed"))
+            guard status == 0 else {
+                throw KiyoError.usb(operation: "\(request.name) on Zoom Absolute", code: status)
+            }
+            values.append(value)
+        }
+
+        let infoBits = values[0]
+        return ZoomCapabilities(
+            minimum: values[1],
+            maximum: values[2],
+            step: values[3],
+            defaultValue: values[4],
+            current: values[5],
+            supportsGet: infoBits & 0x01 != 0,
+            supportsSet: infoBits & 0x02 != 0)
+    }
+
+    /// Applies one already-range-checked UVC Zoom Absolute value. Callers pass
+    /// the capabilities they just discovered so arbitrary or stale values are
+    /// rejected before a SET request can leave the process.
+    @discardableResult
+    public func setZoomAbsolute(_ value: UInt16,
+                                capabilities: ZoomCapabilities) throws -> Int {
+        guard capabilities.supportsSet else {
+            throw KiyoError.invalidArgument("this camera reports Zoom Absolute as read-only")
+        }
+        guard value >= capabilities.minimum, value <= capabilities.maximum else {
+            throw KiyoError.invalidArgument(
+                "zoom value \(value) is outside \(capabilities.minimum)...\(capabilities.maximum)")
+        }
+        let step = capabilities.step
+        guard step > 0, (value - capabilities.minimum) % step == 0 else {
+            throw KiyoError.invalidArgument(
+                "zoom value \(value) is not aligned to step \(step)")
+        }
+
+        paceBeforeTransfer()
+        options.log?(String(format: "  → SET_CUR sel=0x0b wIndex=0x%04x len=2  %02x %02x"
+                            + "  # digital zoom",
+                            info.cameraTerminalWIndex,
+                            value & 0xff, value >> 8))
+        let status = kiyo_zoom_set(handle, value)
+        recordTransfer()
+        guard status == 0 else {
+            throw KiyoError.usb(operation: "SET_CUR (Zoom Absolute)", code: status)
+        }
+        return 1
+    }
+
     /// UVC GET_CUR on the read-back selector.
     ///
     /// Known not to work on the firmware `cameractrls` was tested against, which
@@ -178,6 +292,8 @@ public final class KiyoDevice {
     /// characterised on newer firmware; callers should treat an error as normal.
     public func readBack(selector: KiyoProtocol.Selector = .getISPResult,
                          length: UInt16 = KiyoProtocol.payloadLength) throws -> [UInt8] {
+        paceBeforeTransfer()
+        defer { recordTransfer() }
         var buffer = [UInt8](repeating: 0, count: Int(length))
         var done: UInt16 = 0
 
@@ -202,6 +318,8 @@ public final class KiyoDevice {
     }
 
     private func send(_ transfer: KiyoTransfer) throws {
+        paceBeforeTransfer()
+        defer { recordTransfer() }
         options.log?(describe(transfer))
 
         let status = transfer.payload.withUnsafeBufferPointer { buffer in
@@ -219,10 +337,17 @@ public final class KiyoDevice {
         transfer.describe(wIndex: info.wIndex)
     }
 
-    /// Named to avoid shadowing Darwin's `sleep`, which takes seconds.
-    private func pause(milliseconds: UInt32) {
-        guard milliseconds > 0 else { return }
-        Thread.sleep(forTimeInterval: Double(milliseconds) / 1000)
+    private func paceBeforeTransfer() {
+        guard let previous = lastTransferNanoseconds else { return }
+        let required = UInt64(options.delayMilliseconds) * 1_000_000
+        let now = DispatchTime.now().uptimeNanoseconds
+        let elapsed = now >= previous ? now - previous : 0
+        guard elapsed < required else { return }
+        Thread.sleep(forTimeInterval: Double(required - elapsed) / 1_000_000_000)
+    }
+
+    private func recordTransfer() {
+        lastTransferNanoseconds = DispatchTime.now().uptimeNanoseconds
     }
 
     private static func decodeCString<T>(_ value: T) -> String {

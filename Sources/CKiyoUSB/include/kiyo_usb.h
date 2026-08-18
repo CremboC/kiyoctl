@@ -39,6 +39,7 @@ typedef enum {
     KIYO_ERR_NO_MEM       = 6,
     KIYO_ERR_SHORT_XFER   = 7,  /* device ACKed but returned fewer bytes than asked */
     KIYO_ERR_TOO_LONG     = 8,  /* payload exceeds KIYO_MAX_PAYLOAD */
+    KIYO_ERR_NO_ZOOM      = 9,  /* Camera Terminal does not advertise Zoom Absolute */
 } kiyo_status;
 
 typedef struct {
@@ -48,6 +49,12 @@ typedef struct {
     uint8_t  vc_interface;  /* DISCOVERED VideoControl bInterfaceNumber */
     bool     xu_found;      /* false => unit_id/vc_interface are meaningless */
     bool     xu_via_fallback; /* true => found by raw GUID scan, not a clean descriptor walk */
+    bool     camera_terminal_found;
+    bool     zoom_absolute_supported;
+    uint8_t  camera_terminal_id;
+    uint16_t objective_focal_length_min;
+    uint16_t objective_focal_length_max;
+    uint16_t ocular_focal_length;
     char     product[128];
     char     serial[128];
 } kiyo_device_info;
@@ -109,6 +116,16 @@ int32_t kiyo_set_cur(kiyo_handle *h, uint8_t selector, const uint8_t *data, uint
  */
 int32_t kiyo_get_cur(kiyo_handle *h, uint8_t selector, uint8_t *data, uint16_t len,
                      uint16_t *out_done);
+
+/* Constrained read-only access to CT_ZOOM_ABSOLUTE_CONTROL. `request` must be
+ * GET_CUR (0x81), GET_MIN (0x82), GET_MAX (0x83), GET_RES (0x84), GET_INFO
+ * (0x86), or GET_DEF (0x87). The first five value requests return a 2-byte
+ * little-endian value; GET_INFO returns its one-byte bitmap in out_value. */
+int32_t kiyo_zoom_get(kiyo_handle *h, uint8_t request, uint16_t *out_value);
+
+/* Constrained SET_CUR for CT_ZOOM_ABSOLUTE_CONTROL. Range validation is done
+ * against the values returned by kiyo_zoom_get before this function is called. */
+int32_t kiyo_zoom_set(kiyo_handle *h, uint16_t value);
 
 /* Human-readable name for a status code, or NULL if the code is unrecognised
    (in which case the caller should print it as hex). */

@@ -27,6 +27,7 @@ enum KiyoCLI {
             case "af":     try autofocus(arguments)
             case "set":    try set(arguments)
             case "probe":  try probe(arguments)
+            case "zoom-info": try zoomInfo(arguments)
             default:
                 throw CLIFailure.usage("unknown command '\(arguments.positionals[0])'")
             }
@@ -56,6 +57,10 @@ enum KiyoCLI {
         let videoControlInterface: Int?
         let wIndex: String?
         let discoveredByFallbackScan: Bool
+        let cameraTerminalID: Int?
+        let zoomAbsoluteSupported: Bool
+        let objectiveFocalLengthMin: Int?
+        let objectiveFocalLengthMax: Int?
     }
 
     private static func list(_ arguments: Arguments) throws {
@@ -72,7 +77,13 @@ enum KiyoCLI {
                     unitID: device.extensionUnitFound ? Int(device.unitID) : nil,
                     videoControlInterface: device.extensionUnitFound ? Int(device.vcInterface) : nil,
                     wIndex: device.extensionUnitFound ? String(format: "0x%04x", device.wIndex) : nil,
-                    discoveredByFallbackScan: device.foundViaFallbackScan)
+                    discoveredByFallbackScan: device.foundViaFallbackScan,
+                    cameraTerminalID: device.cameraTerminalFound ? Int(device.cameraTerminalID) : nil,
+                    zoomAbsoluteSupported: device.zoomAbsoluteSupported,
+                    objectiveFocalLengthMin: device.cameraTerminalFound
+                        ? Int(device.objectiveFocalLengthMin) : nil,
+                    objectiveFocalLengthMax: device.cameraTerminalFound
+                        ? Int(device.objectiveFocalLengthMax) : nil)
             }
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -108,6 +119,15 @@ enum KiyoCLI {
                       a different Kiyo model. Update the firmware from Windows and retry.
                       """)
             }
+            if device.cameraTerminalFound {
+                field("camera terminal", "bTerminalID \(device.cameraTerminalID), wIndex "
+                      + String(format: "0x%04x", device.cameraTerminalWIndex))
+                field("Zoom Absolute", device.zoomAbsoluteSupported ? "supported" : "not advertised")
+                field("focal descriptors", "objective \(device.objectiveFocalLengthMin)…"
+                      + "\(device.objectiveFocalLengthMax), ocular \(device.ocularFocalLength)")
+            } else {
+                field("camera terminal", "NOT FOUND")
+            }
             print("")
         }
     }
@@ -142,6 +162,10 @@ enum KiyoCLI {
         if let value = state.hdr { field("hdr", value) }
         if let value = state.hdrMode { field("hdr mode", value) }
         if let value = state.autofocus { field("af", value) }
+        if let value = state.zoomAbsolute { field("zoom absolute", "\(value)") }
+        if let value = state.approximateFieldOfView {
+            field("effective fov", String(format: "~%.1f°", value))
+        }
         field("persisted to camera", (state.persisted ?? false) ? "yes" : "no")
         field("cache file", KiyoStateStore.url.path)
     }
@@ -256,6 +280,21 @@ enum KiyoCLI {
     }
 
     // MARK: - probe
+
+    private static func zoomInfo(_ arguments: Arguments) throws {
+        let verbose = arguments.has("--verbose", "-v")
+        let options = try arguments.deviceOptions(verboseLogging: verbose)
+        let device = try KiyoDevice(locationID: try arguments.locationID(), options: options)
+
+        print(summaryHeader(for: device.info))
+        print("\nRead-only UVC Zoom Absolute capability probe; nothing is written.\n")
+        let zoom = try device.zoomCapabilities()
+        field("range", "\(zoom.minimum)…\(zoom.maximum), step \(zoom.step)")
+        field("default", "\(zoom.defaultValue)")
+        field("current", "\(zoom.current)")
+        field("GET supported", zoom.supportsGet ? "yes" : "no")
+        field("SET supported", zoom.supportsSet ? "yes" : "no")
+    }
 
     private static func probe(_ arguments: Arguments) throws {
         let options = try arguments.deviceOptions(verboseLogging: false)
@@ -402,6 +441,7 @@ enum KiyoCLI {
           kiyoctl set fov=narrow,hdr=off        batch, with a single persist at the end
           kiyoctl status                        the write cache (see the caveat it prints)
           kiyoctl probe                         read-back experiment; writes nothing
+          kiyoctl zoom-info                     read UVC zoom range; writes nothing
 
         OPTIONS
           --device <id>        target one camera by location ID (hex or decimal)

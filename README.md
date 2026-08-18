@@ -63,12 +63,29 @@ change. You can also make several session-only changes and then check it: the ap
 one persistence command to save the accumulated camera state. Uncheck it to return to
 session-only changes.
 
-The menu app sends no control transfers merely by launching or opening its menu. It
-enumerates the camera once at launch, disables controls while a command is running, and
-uses the same pacing, transfer ceiling, exact payload validation and no-retry behavior as
-the CLI. Checkmarks mean only "successfully written by this app during this session" —
-the firmware does not provide reliable read-back. The locally built bundle is ad-hoc
+At launch the menu app enumerates once, then makes six standard, read-only UVC requests
+to learn the digital-zoom range. It does not write merely by launching or opening its menu.
+The app disables controls while a command is running and uses the same pacing, transfer
+ceiling, exact payload validation and no-retry behavior as the CLI. Checkmarks mean only
+"successfully written by this app during this session." The locally built bundle is ad-hoc
 signed without App Sandbox or USB entitlements.
+
+#### Approximate digital FOV
+
+The three Razer FOV modes remain the native bases: approximately 103°, 90° and 80°.
+After choosing one, the menu also offers approximate digital crops at 70°, 60°, 50°, 40°,
+30° and 24° where the selected base and zoom range can reach them. Choosing a native base
+resets digital zoom to 100%.
+
+This is the standard UVC Camera Terminal **Zoom Absolute** control, not another guessed
+Razer payload. Firmware 8.21 advertises GET and SET support with a range of 100…400,
+step 1 and default 100. Its focal-length descriptor fields are all zero, so the labels use
+the rectilinear crop approximation
+`effective = 2 × atan(tan(base / 2) / (zoom / 100))` and deliberately retain `~`.
+
+The Razer persist command is proven for its vendor FOV/HDR/AF settings. Whether it also
+commits the standard UVC zoom value is not yet verified, so a digital FOV reports
+**save requested**, not **saved**, until an unplug/replug test confirms it.
 
 ## Usage
 
@@ -80,6 +97,7 @@ kiyoctl af responsive|passive
 kiyoctl set fov=narrow,hdr=off        batch, with a single persist at the end
 kiyoctl status                        the write cache (see the caveat it prints)
 kiyoctl probe                         read-back experiment; writes nothing
+kiyoctl zoom-info                     read Zoom Absolute range; writes nothing
 ```
 
 Useful flags: `--dry-run`, `--verbose`, `--no-save`, `--device <locationID>`,
@@ -138,6 +156,12 @@ subtype preceding the match. Firmware revisions renumber units, so this is not o
 2 = `00` followed by the real write with byte 2 = `01`; byte 4 carries the FOV index.
 Wide needs only the single write. The mechanism behind the pre-write is not understood —
 Synapse sends it, so `kiyoctl` sends it.
+
+**Digital zoom** is separate and standards-based. The Camera Terminal is discovered from
+its `VC_INPUT_TERMINAL` descriptor; Zoom Absolute support is bit D9 of `bmControls`.
+Requests use selector `0x0b`, the discovered terminal ID in the high byte of `wIndex`, and
+a two-byte little-endian value. Capability reads use `GET_INFO`, `GET_MIN`, `GET_MAX`,
+`GET_RES`, `GET_DEF` and `GET_CUR`; the only write is a range- and step-validated `SET_CUR`.
 
 **Persist** (`c0 03 a8 …`) goes last, once, after all the setting writes. Without it the
 settings apply to the live session and are lost on replug.

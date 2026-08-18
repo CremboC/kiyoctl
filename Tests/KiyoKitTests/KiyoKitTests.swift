@@ -29,6 +29,30 @@ import Testing
     try KiyoDevice.validate(plan)
 }
 
+@Test func digitalFOVMappingUsesRectilinearCropGeometry() throws {
+    let degrees = KiyoDigitalFOV.approximateDegrees(
+        baseDegrees: 80, zoomValue: 200, neutralZoomValue: 100)
+    #expect(abs(degrees - 45.52) < 0.02)
+
+    let value = try #require(KiyoDigitalFOV.zoomValue(
+        targetDegrees: 60, baseDegrees: 80,
+        minimum: 100, maximum: 400, step: 1))
+    #expect(value == 145)
+
+    let roundTrip = KiyoDigitalFOV.approximateDegrees(
+        baseDegrees: 80, zoomValue: value, neutralZoomValue: 100)
+    #expect(abs(roundTrip - 60) < 0.2)
+}
+
+@Test func digitalFOVMappingRejectsUnsupportedAngles() {
+    #expect(KiyoDigitalFOV.zoomValue(
+        targetDegrees: 90, baseDegrees: 80,
+        minimum: 100, maximum: 400, step: 1) == nil)
+    #expect(KiyoDigitalFOV.zoomValue(
+        targetDegrees: 20, baseDegrees: 80,
+        minimum: 100, maximum: 400, step: 1) == nil)
+}
+
 @Test func unsafeOptionsAreRejectedBeforeOpeningUSBDevice() {
     var options = KiyoDevice.Options()
     options.delayMilliseconds = KiyoDevice.minimumDelayMilliseconds - 1
@@ -67,6 +91,8 @@ import Testing
     state.record(KiyoSettings(fieldOfView: .wide), on: first, saved: true)
 
     #expect(!state.belongs(to: first))
+    #expect(state.canRestoreDisplay(for: first))
+    #expect(!state.canRestoreDisplay(for: device(location: 0x2000, serial: "")))
 }
 
 private func expectError(_ body: () throws -> Void) {
@@ -87,5 +113,11 @@ private func device(location: UInt32, serial: String) -> KiyoDeviceInfo {
         unitID: 12,
         vcInterface: 0,
         extensionUnitFound: true,
-        foundViaFallbackScan: false)
+        foundViaFallbackScan: false,
+        cameraTerminalFound: true,
+        cameraTerminalID: 1,
+        zoomAbsoluteSupported: true,
+        objectiveFocalLengthMin: 100,
+        objectiveFocalLengthMax: 400,
+        ocularFocalLength: 100)
 }
